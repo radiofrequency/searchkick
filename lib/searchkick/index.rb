@@ -62,7 +62,6 @@ module Searchkick
         records.each do |record|
           reindex_record(record) 
         end
-
       end
       #bulk method
       #records.group_by{|r| document_type(r) }.each do |type, batch|
