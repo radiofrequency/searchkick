@@ -58,19 +58,13 @@ module Searchkick
     end
 
     def import(records)
-      if records
-        records.each do |record|
-          reindex_record(record) 
-        end
+      records.group_by{|r| document_type(r) }.each do |type, batch|
+        client.bulk(
+          index: name,
+          type: type,
+          body: batch.map{|r| {index: {_id: search_id(r), data: search_data(r)}} }
+        )
       end
-      #bulk method
-      #records.group_by{|r| document_type(r) }.each do |type, batch|
-      #  client.bulk(
-      #    index: name,
-      #    type: type,
-      #    body: batch.map{|r| {index: {_id: search_id(r), data: search_data(r)}} }
-      #  )
-      #end
     end
 
     def retrieve(record)
