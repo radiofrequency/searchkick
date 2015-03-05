@@ -3,6 +3,7 @@ module Searchkick
     attr_reader :name, :options
 
     def initialize(name, options = {})
+      #puts "Initizlize #{name} #{options.inspect}"
       @name = name
       @options = options
     end
@@ -27,51 +28,113 @@ module Searchkick
       client.indices.exists_alias name: name
     end
 
+    def swap_partition(partition, new_name)
+
+      #puts "SWAP #{name}, #{partition}, #{new_name}"
+      #puts "user-#{partition}-#{name}"
+       old_indices =
+      begin
+        client.indices.get_alias(name: partition).keys
+      rescue Elasticsearch::Transport::Transport::Errors::NotFound
+        []
+      end
+      actions = old_indices.map { |old_name| {remove: {index: old_name, alias: partition}} } + [{add: {index: new_name, alias: partition}}]
+      puts ="swap actions: #{actions.inspect}"
+      client.indices.update_aliases body: {actions: actions}
+
+    end
     def swap(new_name)
+
+      #puts "SWAP #{name}"
       old_indices =
-        begin
-          client.indices.get_alias(name: name).keys
-        rescue Elasticsearch::Transport::Transport::Errors::NotFound
-          []
-        end
+      begin
+        client.indices.get_alias(name: name).keys
+      rescue Elasticsearch::Transport::Transport::Errors::NotFound
+        []
+      end
+
+      #puts "old indexes: #{old_indices.inspect}"
+
       actions = old_indices.map { |old_name| {remove: {index: old_name, alias: name}} } + [{add: {index: new_name, alias: name}}]
+      #puts "actions: #{actions.inspect}"
+      
       client.indices.update_aliases body: {actions: actions}
     end
 
     # record based
 
     def store(record)
+
       client.index(
-        index: name,
+      index: name,
+      type: document_type(record),
+      id: search_id(record),
+      body: search_data(record)
+      )
+      #puts "STORE!"
+      #puts options.inspect
+
+      if options[:partition_field]
+        partition_index = "user-#{record[options[:partition_field]]}-#{name}"
+        #puts client.indices.inspect
+        if not client.indices.exists index: partition_index
+          #puts "index created"
+          client.indices.create index: partition_index, body: options
+        end
+        #puts record.inspect
+
+        client.index(
+        index: partition_index,
         type: document_type(record),
         id: search_id(record),
         body: search_data(record)
-      )
+        )
+        #puts "indexed"
+        #puts "STORE!"
+
+      end
     end
 
     def remove(record)
       client.delete(
-        index: name,
-        type: document_type(record),
-        id: search_id(record)
+      index: name,
+      type: document_type(record),
+      id: search_id(record)
       )
     end
 
     def import(records)
-      records.group_by{|r| document_type(r) }.each do |type, batch|
-        client.bulk(
-          index: name,
-          type: type,
+          #puts "import #{options[:partition_index]}"
+          #puts options.inspect;
+      if options[:partition_field]
+#        records.select(options[:partition_field]).group(options[:partition_field]).
+        
+        records.group_by{|r| r[options[:partition_field]]}.each do |partition_id, batch|
+        
+
+          client.bulk(
+          index: @new_parition_index,
+          type:  document_type(batch.first),
           body: batch.map{|r| {index: {_id: search_id(r), data: search_data(r)}} }
+          )
+        end
+      end
+      records.group_by{|r| document_type(r) }.each do |type, batch|
+        #puts "TYPE #{type.inspect}"
+        client.bulk(
+        index: name,
+        type: type,
+        body: batch.map{|r| {index: {_id: search_id(r), data: search_data(r)}} }
         )
+
       end
     end
 
     def retrieve(record)
       client.get(
-        index: name,
-        type: document_type(record),
-        id: record.id
+      index: name,
+      type: document_type(record),
+      id: record.id
       )["_source"]
     end
 
@@ -97,8 +160,8 @@ module Searchkick
 
     def similar_record(record, options = {})
       like_text = retrieve(record).to_hash
-        .keep_if { |k, v| !options[:fields] || options[:fields].map(&:to_s).include?(k) }
-        .values.compact.join(" ")
+      .keep_if { |k, v| !options[:fields] || options[:fields].map(&:to_s).include?(k) }
+      .values.compact.join(" ")
 
       # TODO deep merge method
       options[:where] ||= {}
@@ -114,6 +177,15 @@ module Searchkick
     # search
 
     def search_model(searchkick_klass, term = nil, options = {}, &block)
+      #puts "search model #{options.inspect}"
+      if options[:partition_value]
+        #puts "changing index to user-#{options[:partition_value].to_i}-#{name}"
+        options[:index] = "user-#{options[:partition_value]}-#{name}"
+      end
+
+      #options[:index] = index
+
+      #puts "SEARCHING index: #{options.inspect}"
       query = Searchkick::Query.new(searchkick_klass, term, options)
       if block
         block.call(query.body)
@@ -133,56 +205,135 @@ module Searchkick
       index
     end
 
+
+    def partition_indices
+       all_indices = client.indices.get_aliases
+       all_indices.select { |k, v| (v.empty? || v["aliases"].empty?) && k =~ /\A(?:user-\d+)?-#{Regexp.escape(name)}_\d{14,17}\z/ }.keys
+        
+    end
+    def clean_partition_indices
+      #indices = all_indices.select { |k, v| (v.empty? || v["aliases"].empty?) && k =~ /\A#{Regexp.escape(name)}_\d{14,17}\z/ }.keys
+      #indices = partition_indices
+      indices = partition_indices
+      puts "found #{indices.count} partition indexes"
+      indices.each do |index|
+        puts "deleting index: #{index}"
+        Searchkick::Index.new(index).delete
+      end
+      indices
+
+    end
+
+    def clean_all_indices
+      #all_indices = client.indices.get_aliases
+      #indices.each do |index|
+      #  Searchkick::Index.new(index).delete
+      #end
+      client.indices.delete index: '_all'
+
+      #all_indices = client.indices.get_aliases
+      #indices = all_indices.select { |k, v| (v.empty? || v["aliases"].empty?) && k =~ /\A#{Regexp.escape(name)}_\d{14,17}\z/ }.keys
+      #client.indices.update_aliases body: {actions: [{add: {index: index_name, alias: "user-#{partition_id}-product_flat"}}]}
+
+      #client.indices.delete name: '_all'
+    end
+
     # remove old indices that start w/ index_name
     def clean_indices
       all_indices = client.indices.get_aliases
       indices = all_indices.select { |k, v| (v.empty? || v["aliases"].empty?) && k =~ /\A#{Regexp.escape(name)}_\d{14,17}\z/ }.keys
+      #indices = all_indices.select { |k, v| (v.empty? || v["aliases"].empty?) && k =~ /\A(?:user\-d+)?#{Regexp.escape(name)}_\d{14,17}\z/ }.keys
+      
+      
       indices.each do |index|
         Searchkick::Index.new(index).delete
       end
       indices
     end
 
+
+
     # https://gist.github.com/jarosan/3124884
     # http://www.elasticsearch.org/blog/changing-mapping-with-zero-downtime/
     def reindex_scope(scope, options = {})
+      #puts options.inspect
       skip_import = options[:import] == false
 
+      #clean_all_indices
       clean_indices
+      #clean_partition_indices
+      #return
 
-      index = create_index
+        #partition_indices.each do |pi|
+         # if client.indices.exists_alias
+      if options[:partition_field]
+        #puts "cleaning partition_indexes"
+        #clean_partition_indices
+        if options[:partition_value]
+          new_partition_index=  "user-#{options[:partition_value]}-#{name}_#{Time.now.strftime('%Y%m%d%H%M%S%L')}"
+          @new_parition_index = new_partition_index
 
-      # check if alias exists
-      if alias_exists?
-        # import before swap
-        index.import_scope(scope) unless skip_import
+          partition_alias= "user-#{options[:partition_value]}-#{name}"
+          @new_parition_type = partition_alias
+          
+          puts "creating index #{new_partition_index} for #{@name}"
+          client.indices.create index: new_partition_index, body: index_options
+          #puts "partition alias #{partition_alias}"
+          #if client.indices.exists index: partition_alias
+            #puts "index exists"
 
-        # get existing indices to remove
-        swap(index.name)
-        clean_indices
+          import_scope(scope.where("#{options[:partition_field]}=#{options[:partition_value]}")) unless skip_import
+          swap_partition(partition_alias, new_partition_index)
+          #else
+            #puts "index doesn't exist"
+          #  import_scope(scope.where("#{options[:partition_field]}=#{options[:partition_value]}")) unless skip_import
+          #  swap_partition(partition_alias, new_partition_index)
+          #end
+          clean_partition_indices
+        end
+
       else
-        delete if exists?
-        swap(index.name)
 
-        # import after swap
-        index.import_scope(scope) unless skip_import
+        index = create_index
+
+        # check if alias exists
+        if alias_exists?
+          # import before swap
+          index.import_scope(scope) unless skip_import
+
+          # get existing indices to remove
+          swap(index.name)
+          clean_indices
+        else
+          delete if exists?
+          swap(index.name)
+
+          # import after swap
+          index.import_scope(scope) unless skip_import
+        end
+
+        index.refresh
+
       end
-
-      index.refresh
 
       true
     end
 
     def import_scope(scope)
-      batch_size = @options[:batch_size] || 1000
+      #puts "scope #{scope.inspect}"
+      batch_size = @options[:batch_size] || 5000
 
       # use scope for import
       scope = scope.search_import if scope.respond_to?(:search_import)
       if scope.respond_to?(:find_in_batches)
+        puts "finding in batches"
+
         scope.find_in_batches batch_size: batch_size do |batch|
           import batch.select(&:should_index?)
         end
       else
+        puts "not finding in batches :("
+        
         # https://github.com/karmi/tire/blob/master/lib/tire/model/import.rb
         # use cursor for Mongoid
         items = []
@@ -380,7 +531,7 @@ module Searchkick
 
         mapping_options = Hash[
           [:autocomplete, :suggest, :text_start, :text_middle, :text_end, :word_start, :word_middle, :word_end, :highlight]
-            .map { |type| [type, (options[type] || []).map(&:to_s)] }
+          .map { |type| [type, (options[type] || []).map(&:to_s)] }
         ]
 
         mapping_options.values.flatten.uniq.each do |field|
@@ -483,6 +634,7 @@ module Searchkick
     end
 
     def search_data(record)
+      #puts "search data for #{record.inspect}"
       source = record.search_data
       options = record.class.searchkick_options
 

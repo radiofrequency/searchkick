@@ -29,6 +29,7 @@ module Searchkick
             index = class_variable_get :@@searchkick_index
             index = index.call if index.respond_to? :call
             Searchkick::Index.new(index, searchkick_options)
+            
           end
 
           def enable_search_callbacks

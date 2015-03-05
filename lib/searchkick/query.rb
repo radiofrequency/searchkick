@@ -391,7 +391,7 @@ module Searchkick
 
     def params
       params = {
-        index: options[:index_name] || searchkick_index.name,
+        index: options[:index] || options[:index_name] || searchkick_index.name,
         body: body
       }
       params.merge!(type: @type) if @type
@@ -400,6 +400,18 @@ module Searchkick
 
     def execute
       begin
+
+        puts "about to search"
+        puts options.inspect
+
+        #_params = params.dup
+        #if options[:partition_value]
+        #  params[:index] =  options[:index].to_s
+        #end
+
+
+        #params[:index] = "baloony"
+        puts "#{params.inspect}"
         response = Searchkick.client.search(params)
       rescue => e # TODO rescue type
         status_code = e.message[1..3].to_i
